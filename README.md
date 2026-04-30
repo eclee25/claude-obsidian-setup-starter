@@ -7,7 +7,7 @@ This repo is a derivative of [lucasrosati/claude-code-memory-setup](https://gith
 - A formal **note-type taxonomy** (concept / technical / decision / literature / workflow / fleeting / project-index) with mandatory frontmatter and templates.
 - **R and Stan extractor patches** for graphify (upstream graphify covers neither language) with a reversible, idempotent applicator that survives `pipx upgrade`.
 - A **community labelling workflow** for graphify clusters that survives re-clustering — communities keep their plain-language names across rebuilds via a member-keyed `.graphify_labels.json` and Jaccard carry-forward in a post-commit hook.
-- A **multi-profile** layout (`.claude`, `.claude-perso`, `.claude-gdd`) sharing skills and `CLAUDE.md` via dotfiles symlinks.
+- A **multi-profile** layout (`.claude`, `.claude-acct1`, `.claude-acct2`) sharing skills and `CLAUDE.md` via dotfiles symlinks.
 - Explicit `/save` and `/resume` slash commands with a `fleeting/` retirement sweep.
 
 Clone this repo as your starting vault, rename the dummy `data-pipeline/` project, and you're ready.
@@ -385,7 +385,7 @@ mkdir -p ~/dotfiles/claude
 cp -r ~/.claude/skills ~/dotfiles/claude/skills
 cp ~/.claude/CLAUDE.md ~/dotfiles/claude/CLAUDE.md
 
-for prof in ~/.claude ~/.claude-perso ~/.claude-gdd; do
+for prof in ~/.claude ~/.claude-acct1 ~/.claude-acct2; do
     rm -rf "$prof/skills" "$prof/CLAUDE.md"
     ln -s ~/dotfiles/claude/skills "$prof/skills"
     ln -s ~/dotfiles/claude/CLAUDE.md "$prof/CLAUDE.md"
