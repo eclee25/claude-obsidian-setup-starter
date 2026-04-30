@@ -1,0 +1,14 @@
+# Auto-generated — not permanent knowledge
+chats/
+
+# Auto-generated graphify mirror — rebuilt by the post-commit hook
+graphify/
+
+# Tooling junk
+**/__pycache__/
+*.Rhistory
+*.log
+
+# Obsidian view state — keep workspace.json out of source control
+.obsidian/workspace.json
+.obsidian/workspace-mobile.json

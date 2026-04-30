@@ -1,0 +1,230 @@
+#!/bin/sh
+# post-commit-graphify
+# Project-level git post-commit hook: rebuilds the graphify graph after every
+# pipeline-touching commit, carries community labels forward across re-clusters
+# via Jaccard match against member sets, and mirrors the result into a vault
+# subfolder.
+#
+# Install in YOUR project (not the vault) by copying or symlinking to
+#   <project>/.git/hooks/post-commit
+# and making it executable:
+#   chmod +x <project>/.git/hooks/post-commit
+#
+# --- Configuration ----------------------------------------------------------
+# Override via env vars or edit the defaults. The two project-specific knobs:
+#
+#   GRAPHIFY_VAULT_MIRROR  Absolute path to the vault subfolder where the
+#                          Obsidian mirror should land. Wiped and regenerated
+#                          on every successful run.
+#   GRAPHIFY_TARGET_RE     Python regex; the hook only fires when a committed
+#                          file's path matches. Tune to your project layout.
+#   GRAPHIFY_FILE_GLOBS    Space-separated glob patterns (Python glob syntax)
+#                          discovered at runtime to feed the extractor.
+#
+# Defaults below are an example for an R/Stan project with analysis/, tests/,
+# and notebooks/ as graph scope. Adapt to your stack.
+# ----------------------------------------------------------------------------
+
+VAULT_MIRROR="${GRAPHIFY_VAULT_MIRROR:-$HOME/vault/graphify/$(basename "$(git rev-parse --show-toplevel)")}"
+TARGET_RE="${GRAPHIFY_TARGET_RE:-^(analysis/(?!scratchpads/)|tests/).*\\.(R|sh|stan|Rmd|qmd)$}"
+FILE_GLOBS="${GRAPHIFY_FILE_GLOBS:-analysis/**/*.R analysis/**/*.sh analysis/**/*.stan tests/**/*.R tests/*.R notebooks/**/*.Rmd notebooks/**/*.qmd}"
+
+# Skip during rebase / merge / cherry-pick
+GIT_DIR=$(git rev-parse --git-dir 2>/dev/null)
+[ -d "$GIT_DIR/rebase-merge" ] && exit 0
+[ -d "$GIT_DIR/rebase-apply" ] && exit 0
+[ -f "$GIT_DIR/MERGE_HEAD" ] && exit 0
+[ -f "$GIT_DIR/CHERRY_PICK_HEAD" ] && exit 0
+
+CHANGED=$(git diff --name-only HEAD~1 HEAD 2>/dev/null || git diff --name-only HEAD 2>/dev/null)
+if [ -z "$CHANGED" ]; then
+    exit 0
+fi
+
+# --- Locate a Python with graphify importable ------------------------------
+GRAPHIFY_BIN=$(command -v graphify 2>/dev/null)
+if [ -n "$GRAPHIFY_BIN" ]; then
+    case "$GRAPHIFY_BIN" in
+        *.exe) _SHEBANG="" ;;
+        *)     _SHEBANG=$(head -1 "$GRAPHIFY_BIN" | sed 's/^#![[:space:]]*//') ;;
+    esac
+    case "$_SHEBANG" in
+        */env\ *) GRAPHIFY_PYTHON="${_SHEBANG#*/env }" ;;
+        *)         GRAPHIFY_PYTHON="$_SHEBANG" ;;
+    esac
+    case "$GRAPHIFY_PYTHON" in
+        *[!a-zA-Z0-9/_.@-]*) GRAPHIFY_PYTHON="" ;;
+    esac
+    if [ -n "$GRAPHIFY_PYTHON" ] && ! "$GRAPHIFY_PYTHON" -c "import graphify" 2>/dev/null; then
+        GRAPHIFY_PYTHON=""
+    fi
+fi
+if [ -z "$GRAPHIFY_PYTHON" ]; then
+    if command -v python3 >/dev/null 2>&1 && python3 -c "import graphify" 2>/dev/null; then
+        GRAPHIFY_PYTHON="python3"
+    elif command -v python >/dev/null 2>&1 && python -c "import graphify" 2>/dev/null; then
+        GRAPHIFY_PYTHON="python"
+    else
+        exit 0
+    fi
+fi
+
+export GRAPHIFY_CHANGED="$CHANGED"
+export GRAPHIFY_VAULT_MIRROR="$VAULT_MIRROR"
+export GRAPHIFY_TARGET_RE="$TARGET_RE"
+export GRAPHIFY_FILE_GLOBS="$FILE_GLOBS"
+
+$GRAPHIFY_PYTHON - <<'PY'
+import os, sys, glob, json, re, shutil
+from pathlib import Path
+
+changed = [f.strip() for f in os.environ.get('GRAPHIFY_CHANGED', '').splitlines() if f.strip()]
+if not changed:
+    sys.exit(0)
+
+# Only fire on files matching the configured target regex.
+target_re = re.compile(os.environ['GRAPHIFY_TARGET_RE'])
+relevant = [f for f in changed if target_re.match(f)]
+if not relevant:
+    sys.exit(0)
+
+print(f'[graphify hook] {len(relevant)} target file(s) changed - rebuilding graph...')
+
+try:
+    from graphify.extract import extract
+    from graphify.build import build_from_json
+    from graphify.cluster import cluster, score_all
+    from graphify.analyze import god_nodes, surprising_connections, suggest_questions
+    from graphify.report import generate
+    from graphify.export import to_json, to_html, to_obsidian, to_canvas
+
+    patterns = os.environ['GRAPHIFY_FILE_GLOBS'].split()
+    code_files, seen = [], set()
+    for pattern in patterns:
+        for f in glob.glob(pattern, recursive=True):
+            p = Path(f)
+            if p.exists() and str(p) not in seen:
+                code_files.append(p)
+                seen.add(str(p))
+
+    if not code_files:
+        sys.exit(0)
+
+    result = extract(code_files, cache_root=Path('.'))
+    extraction = {
+        'nodes': result['nodes'],
+        'edges': result['edges'],
+        'hyperedges': [],
+        'input_tokens': 0,
+        'output_tokens': 0,
+    }
+    detection = {'total_files': len(code_files), 'total_words': 0, 'needs_graph': True,
+                 'warning': None, 'files': {'code': [], 'document': [], 'paper': []}}
+    tokens = {'input': 0, 'output': 0}
+
+    G = build_from_json(extraction)
+    communities = cluster(G)
+    cohesion = score_all(G, communities)
+    gods = god_nodes(G)
+    surprises = surprising_connections(G, communities)
+
+    # --- Carry community labels forward via Jaccard match -----------------
+    # Schema: {cid_str: {name, members}}. Communities are re-identified by
+    # member-set overlap rather than by integer cid (which the cluster algo
+    # may shuffle). Names with Jaccard >= JACCARD_THRESHOLD against an old
+    # community are carried forward; otherwise the new cid is flagged
+    # '(drifted)' or '(new)' so the LLM can relabel later.
+    JACCARD_THRESHOLD = 0.5
+    labels_path = Path('graphify-out/.graphify_labels.json')
+    old_entries = {}
+    if labels_path.exists():
+        raw_old = json.loads(labels_path.read_text())
+        for k, v in raw_old.items():
+            if isinstance(v, dict):
+                old_entries[int(k)] = (v.get('name', f'Community {k}'),
+                                       set(v.get('members', [])))
+            else:
+                old_entries[int(k)] = (str(v), set())
+
+    new_member_sets = {cid: set(members) for cid, members in communities.items()}
+    pairs = []
+    for n_cid, n_set in new_member_sets.items():
+        for o_cid, (_, o_set) in old_entries.items():
+            if not n_set or not o_set:
+                continue
+            jac = len(n_set & o_set) / len(n_set | o_set)
+            pairs.append((jac, n_cid, o_cid))
+    pairs.sort(reverse=True)
+
+    new_to_old, used_new, used_old = {}, set(), set()
+    for jac, n, o in pairs:
+        if jac < JACCARD_THRESHOLD:
+            break
+        if n in used_new or o in used_old:
+            continue
+        new_to_old[n] = (o, jac)
+        used_new.add(n); used_old.add(o)
+
+    labels, rich_labels, drift_warnings = {}, {}, []
+    for cid, members in communities.items():
+        if cid in new_to_old:
+            o_cid, jac = new_to_old[cid]
+            name = old_entries[o_cid][0]
+            if jac < 1.0:
+                drift_warnings.append(f'C{cid} <- old C{o_cid} {name!r} (J={jac:.2f})')
+        else:
+            tag = '(new)' if old_entries else ''
+            name = f'Community {cid} {tag}'.strip()
+            if old_entries:
+                drift_warnings.append(f'C{cid} unmatched: {name}')
+        labels[cid] = name
+        rich_labels[str(cid)] = {'name': name, 'members': sorted(members)}
+
+    labels_path.parent.mkdir(parents=True, exist_ok=True)
+    labels_path.write_text(json.dumps(rich_labels, indent=2) + '\n')
+
+    questions = suggest_questions(G, communities, labels)
+    report = generate(G, communities, cohesion, labels, gods, surprises,
+                      detection, tokens, str(Path('.').resolve()),
+                      suggested_questions=questions)
+    Path('graphify-out').mkdir(exist_ok=True)
+    Path('graphify-out/GRAPH_REPORT.md').write_text(report)
+    to_json(G, communities, 'graphify-out/graph.json')
+    to_html(G, communities, 'graphify-out/graph.html', community_labels=labels)
+
+    # --- Regenerate vault mirror -----------------------------------------
+    # Wipe-then-regenerate to avoid stale per-node / _COMMUNITY_ notes.
+    # GRAPH_REPORT.md and graph.json are NOT mirrored (they live only at
+    # graphify-out/ as the source of truth; mirror copies go silently
+    # stale across rebuilds).
+    OBSIDIAN_DIR = Path(os.environ['GRAPHIFY_VAULT_MIRROR']).expanduser()
+    if OBSIDIAN_DIR.is_dir():
+        for child in OBSIDIAN_DIR.iterdir():
+            if child.is_file() or child.is_symlink():
+                child.unlink()
+            else:
+                shutil.rmtree(child)
+        n_notes = to_obsidian(G, communities, str(OBSIDIAN_DIR),
+                              community_labels=labels, cohesion=cohesion)
+        to_canvas(G, communities, str(OBSIDIAN_DIR / 'graph.canvas'),
+                  community_labels=labels)
+        for stray in ('GRAPH_REPORT.md', 'graph.json'):
+            p = OBSIDIAN_DIR / stray
+            if p.exists():
+                p.unlink()
+        print(f'[graphify hook] Mirrored {n_notes} notes to {OBSIDIAN_DIR}')
+
+    print(f'[graphify hook] Rebuilt: {G.number_of_nodes()} nodes, '
+          f'{G.number_of_edges()} edges, {len(communities)} communities')
+    if drift_warnings:
+        noun = 'community' if len(drift_warnings) == 1 else 'communities'
+        sys.stderr.write(
+            f'[graphify hook] WARN: {len(drift_warnings)} {noun} drifted; '
+            f'relabel pass needed:\n')
+        for w in drift_warnings:
+            sys.stderr.write(f'  - {w}\n')
+
+except Exception as exc:
+    print(f'[graphify hook] Rebuild failed: {exc}')
+    sys.exit(1)
+PY
