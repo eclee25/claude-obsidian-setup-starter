@@ -52,7 +52,9 @@ When you receive this command:
 1. Read the most recent day's session logs in `logs/`.
 2. Read decision notes in `permanent/` for the current project — filter by `type: decision` and `project:` matching the project named in the project's `CLAUDE.md`.
 3. List `fleeting/` (titles + `created` dates only — do NOT read full bodies unless asked). Surface count, oldest entry, and any note older than 14 days. Read body on demand.
-4. Summarise current state and what's left to do; flag stale fleeting notes for retirement.
+4. Count files in `chats/code/`. If the count exceeds **500**, surface this as a flag and remind the user that a chat-folder sweep is due (see `/save` step 7a). Do not act unless asked.
+5. Check for `<project>/graphify-out/LABELS_STALE` for the active project. If it exists, surface its contents as a flag: graphify community labels drifted since the last commit and a relabel pass is needed.
+6. Summarise current state and what's left to do; flag stale fleeting notes for retirement.
 
 ### /save
 When you receive this command:
@@ -62,9 +64,13 @@ When you receive this command:
    - **Promote** → rewrite frontmatter using a `templates/` file, `git mv` to `permanent/` (or `references/` / `workflow/`).
    - **Archive** → `git mv` to `fleeting/archive/` (kept as a record of an idea not pursued).
    - **Delete** → if done or stale.
-4. Every 10th `/save`, prompt about chat-history pruning: list `chats/code/*.md` older than 30 days and ask whether to delete. Chats are git-ignored. Recovery after deletion requires re-running `claude-extract` against per-profile session storage. Confirm before deleting.
-5. Run `git status` and surface anything unexpected (uncommitted changes outside the vault notes — dirty submodule pointers, stray files) and confirm before staging.
-6. Run `git commit` and `git push`.
+4. **Current session chat.** Ask the user whether to keep or delete the chat note for the current session (if one exists in `chats/code/`). Default: delete, since the session log captures the durable knowledge. Confirm before deleting.
+5. Chat folder maintenance:
+   a. **Size-triggered sweep (any /save).** Count files in `chats/code/`. If the count exceeds **500**, propose a mid-depth sweep: deduplicate by content hash, mine the unique chats for atomic ideas/TODOs/open questions worth landing as fleeting notes (per [[chat-import-pipeline]] §Mining), then delete the folder contents. Confirm with the user before deleting.
+   b. **Age-triggered prune (every 10th /save).** Prompt about chat history pruning: list `chats/code/*.md` older than 30 days and ask whether to delete. Confirm before deleting.
+   c. Chats are git-ignored. **Recovery after deletion requires re-running `claude-extract`** against per-profile session storage — the export folder `~/claude-exports/code/` is intentionally emptied by the sync (`--move`), so the vault's `chats/code/` is the only persistent copy.
+6. Run `git status` and surface anything unexpected (uncommitted changes outside the vault notes — dirty submodule pointers, stray files) and confirm before staging.
+7. Run `git commit` and `git push`.
 
 ## Chat Import Pipeline
 
