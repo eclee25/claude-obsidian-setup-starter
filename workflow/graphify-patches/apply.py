@@ -45,9 +45,12 @@ EXTENSIONS_MARK = "# vault-patch: R/Stan extensions"
 
 # The actual text we inject
 DISPATCH_ENTRIES = (
-    '        ".R": extract_r, ".r": extract_r, ".Rmd": extract_r, '
-    '".rmd": extract_r, ".qmd": extract_r,\n'
-    '        ".stan": extract_stan,\n'
+    '        ".R": lambda p, **kw: extract_r(p, **kw),\n'
+    '        ".r": lambda p, **kw: extract_r(p, **kw),\n'
+    '        ".Rmd": lambda p, **kw: extract_r(p, **kw),\n'
+    '        ".rmd": lambda p, **kw: extract_r(p, **kw),\n'
+    '        ".qmd": lambda p, **kw: extract_r(p, **kw),\n'
+    '        ".stan": lambda p, **kw: extract_stan(p, **kw),\n'
 )
 EXTENSIONS_ENTRIES = (
     '        ".R", ".r", ".Rmd", ".rmd", ".qmd", ".stan",\n'
@@ -339,7 +342,7 @@ def cmd_apply(python_bin: str, *, verbose: bool = True) -> int:
         changed_any = True
 
     new_content, d_changed = _inject_dispatch(new_content)
-    new_content, e_changed = _inject_extensions(new_content)
+    e_changed = False  # _EXTENSIONS is auto-derived from _DISPATCH in this version
     new_content = new_content.rstrip() + "\n" + _build_footer_block()
     changed_any = True  # footer is always re-emitted
 
