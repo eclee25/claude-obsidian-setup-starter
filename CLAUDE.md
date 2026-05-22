@@ -45,6 +45,15 @@ CLAUDE.md vs vault notes — division of labour: [[claude-md-vs-vault-notes]].
 - Don't create notes without frontmatter
 - Don't change folder structure without documenting it
 
+## Code Change Policy (all projects)
+
+Distinguish between **code changes** and **domain/content logic changes** before acting:
+
+- **Code changes** (implement directly): refactoring, syntax fixes, renaming, performance improvements, rendering bugs, test fixes — correctness is purely technical.
+- **Domain/content logic changes** (describe the issue and options first, implement only after explicit approval): anything that alters what a variable *means* or *captures*, classification rules, inclusion/exclusion criteria, clinical or scientific thresholds, model covariate definitions, how uncertain/unknown cases are handled. These require subject matter expertise to evaluate and must not be changed unilaterally.
+
+When in doubt about which category a change falls into, treat it as domain logic and ask first.
+
 ## Session Commands
 
 ### /resume
